@@ -17,11 +17,12 @@ async function findDuplicates() {
 
     try {
         const libraries = await fetchLibraries(serverUrl, apiKey, serverType);
+        const userId = serverType === 'plex' ? null : await fetchServerUserId(serverUrl, apiKey, serverType);
         const movieLibraries = libraries.filter(lib => lib.CollectionType === 'movies');
         const duplicateResults = [];
 
         for (const library of movieLibraries) {
-            const movies = await fetchMoviesFromLibrary(serverUrl, apiKey, library.ItemId, serverType);
+            const movies = await fetchMoviesFromLibrary(serverUrl, apiKey, library.ItemId, serverType, userId);
             let duplicates = {};
             try {
                 if (serverType === 'plex') {
@@ -60,16 +61,59 @@ async function fetchLibraries(serverUrl, apiKey, serverType) {
     return await response.json();
 }
 
-async function fetchMoviesFromLibrary(serverUrl, apiKey, libraryId, serverType) {
+async function fetchServerUserId(serverUrl, apiKey, serverType) {
+    const endpoint = serverType === 'jellyfin' ? '/Users' : '/emby/Users';
+    const response = await fetch(`${serverUrl}${endpoint}?api_key=${encodeURIComponent(apiKey)}`);
+    if (!response.ok) throw new Error('Failed to fetch users');
+
+    const users = await response.json();
+    const activeUsers = users.filter(user => !(user.Policy && user.Policy.IsDisabled));
+    const user = activeUsers.find(user => user.Policy && user.Policy.IsAdministrator) || activeUsers[0] || users[0];
+    if (!user || !user.Id) throw new Error('No available user found');
+
+    return user.Id;
+}
+
+async function fetchMoviesFromLibrary(serverUrl, apiKey, libraryId, serverType, userId) {
     if (serverType === 'plex') {
         return await fetchPlexMoviesFromLibrary(serverUrl, apiKey, libraryId);
     }
     
     const endpoint = serverType === 'jellyfin' ? '/Items' : '/emby/Items';
-    const response = await fetch(`${serverUrl}${endpoint}?Recursive=true&ParentId=${libraryId}&IncludeItemTypes=Movie&Fields=Path,ProductionYear,RunTimeTicks,MediaSources,MediaStreams&api_key=${apiKey}`);
-    if (!response.ok) throw new Error(`Failed to fetch movies from library ${libraryId}`);
-    const data = await response.json();
-    return data.Items || [];
+    const movies = [];
+    const pageSize = 200;
+    let startIndex = 0;
+
+    while (true) {
+        const params = new URLSearchParams({
+            Recursive: 'true',
+            ParentId: libraryId,
+            IncludeItemTypes: 'Movie',
+            Fields: 'Path,ProductionYear,RunTimeTicks,MediaSources,MediaStreams',
+            StartIndex: String(startIndex),
+            Limit: String(pageSize),
+            api_key: apiKey
+        });
+
+        if (userId) {
+            params.set('UserId', userId);
+        }
+
+        const response = await fetch(`${serverUrl}${endpoint}?${params.toString()}`);
+        if (!response.ok) throw new Error(`Failed to fetch movies from library ${libraryId}: ${response.status}`);
+
+        const data = await response.json();
+        const items = data.Items || [];
+        movies.push(...items);
+
+        if (items.length < pageSize || movies.length >= data.TotalRecordCount) {
+            break;
+        }
+
+        startIndex += items.length;
+    }
+
+    return movies;
 }
 
 // Plex-specific API functions
