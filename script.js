@@ -74,6 +74,25 @@ async function fetchServerUserId(serverUrl, apiKey, serverType) {
     return user.Id;
 }
 
+function getEmbyAuthHeaders(apiKey, userId) {
+    const authParts = [
+        'Client="JellEmPlex-Dedupe"',
+        'Device="Browser"',
+        'DeviceId="jellemplex-dedupe"',
+        'Version="1.0.0"',
+        `Token="${apiKey}"`
+    ];
+
+    if (userId) {
+        authParts.splice(4, 0, `UserId="${userId}"`);
+    }
+
+    return {
+        'Accept': 'application/json',
+        'X-Emby-Authorization': `MediaBrowser ${authParts.join(', ')}`
+    };
+}
+
 async function fetchMoviesFromLibrary(serverUrl, apiKey, libraryId, serverType, userId) {
     if (serverType === 'plex') {
         return await fetchPlexMoviesFromLibrary(serverUrl, apiKey, libraryId);
@@ -1550,11 +1569,23 @@ async function deleteMovieFromServer(itemId, movieTitle, rowElement) {
         } else {
             // Emby/Jellyfin
             const endpoint = serverType === 'jellyfin' ? '/Items' : '/emby/Items';
-            response = await fetch(`${fullServerUrl}${endpoint}/${itemId}?api_key=${apiKey}`, {
-                method: 'DELETE',
-                headers: {
-                    'Content-Type': 'application/json'
+            const userId = await fetchServerUserId(fullServerUrl, apiKey, serverType);
+            const headers = getEmbyAuthHeaders(apiKey, userId);
+            const userItemEndpoint = serverType === 'jellyfin' ? '/Users' : '/emby/Users';
+            const itemResponse = await fetch(`${fullServerUrl}${userItemEndpoint}/${userId}/Items/${itemId}`, {
+                headers
+            });
+
+            if (itemResponse.ok) {
+                const item = await itemResponse.json();
+                if (item.CanDelete === false) {
+                    throw new Error(`${serverType.charAt(0).toUpperCase() + serverType.slice(1)} says this item cannot be deleted. Check the user's delete permissions and library settings.`);
                 }
+            }
+
+            response = await fetch(`${fullServerUrl}${endpoint}/${itemId}`, {
+                method: 'DELETE',
+                headers
             });
         }
         
@@ -1642,7 +1673,16 @@ async function deleteMovieFromServer(itemId, movieTitle, rowElement) {
             showNotification(`Movie "${movieTitle}" was not found in ${serverType.charAt(0).toUpperCase() + serverType.slice(1)} (may have already been deleted)`, 'warning');
             rowElement.remove();
         } else {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            let errorDetails = response.statusText;
+            try {
+                const responseText = await response.text();
+                if (responseText) {
+                    errorDetails = responseText;
+                }
+            } catch (error) {
+                console.warn('Failed to read delete error response:', error);
+            }
+            throw new Error(`HTTP ${response.status}: ${errorDetails}`);
         }
         
     } catch (error) {
