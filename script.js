@@ -74,23 +74,108 @@ async function fetchServerUserId(serverUrl, apiKey, serverType) {
     return user.Id;
 }
 
-function getEmbyAuthHeaders(apiKey, userId) {
+function getEmbyAuthHeaders(token, userId) {
     const authParts = [
         'Client="JellEmPlex-Dedupe"',
         'Device="Browser"',
         'DeviceId="jellemplex-dedupe"',
-        'Version="1.0.0"',
-        `Token="${apiKey}"`
+        'Version="1.0.0"'
     ];
 
     if (userId) {
-        authParts.splice(4, 0, `UserId="${userId}"`);
+        authParts.push(`UserId="${userId}"`);
+    }
+
+    if (token) {
+        authParts.push(`Token="${token}"`);
     }
 
     return {
         'Accept': 'application/json',
         'X-Emby-Authorization': `MediaBrowser ${authParts.join(', ')}`
     };
+}
+
+function promptForEmbyCredentials(serverType) {
+    const serverName = serverType.charAt(0).toUpperCase() + serverType.slice(1);
+
+    return new Promise((resolve, reject) => {
+        const overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:10001;display:flex;align-items:center;justify-content:center;';
+
+        const modal = document.createElement('form');
+        modal.style.cssText = 'background:#2e445e;color:white;padding:24px;border-radius:12px;width:min(420px,90vw);box-shadow:0 10px 30px rgba(0,0,0,0.45);';
+        modal.innerHTML = `
+            <h3 style="margin-top:0;">${serverName} delete login</h3>
+            <p style="line-height:1.4;">${serverName} 10.7.x cannot delete with API keys. Enter a ${serverName} user that has delete permission. The token is kept only in this browser tab.</p>
+            <label style="display:block;margin:12px 0 6px;">Username</label>
+            <input name="username" autocomplete="username" required style="width:100%;box-sizing:border-box;padding:10px;border-radius:6px;border:1px solid #95a5a6;">
+            <label style="display:block;margin:12px 0 6px;">Password</label>
+            <input name="password" type="password" autocomplete="current-password" style="width:100%;box-sizing:border-box;padding:10px;border-radius:6px;border:1px solid #95a5a6;">
+            <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:18px;">
+                <button type="button" data-cancel style="padding:10px 14px;border:0;border-radius:6px;background:#7f8c8d;color:white;cursor:pointer;">Cancel</button>
+                <button type="submit" style="padding:10px 14px;border:0;border-radius:6px;background:#27ae60;color:white;cursor:pointer;">Continue</button>
+            </div>
+        `;
+
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+        modal.elements.username.focus();
+
+        const close = () => overlay.remove();
+
+        modal.querySelector('[data-cancel]').onclick = () => {
+            close();
+            reject(new Error('Delete cancelled'));
+        };
+
+        modal.onsubmit = event => {
+            event.preventDefault();
+            const username = modal.elements.username.value.trim();
+            const password = modal.elements.password.value;
+            close();
+            resolve({ username, password });
+        };
+    });
+}
+
+async function getEmbyDeleteAuth(serverUrl, serverType) {
+    const cacheKey = `${serverType}:${serverUrl}`;
+    window.jellemplexDeleteAuth = window.jellemplexDeleteAuth || {};
+
+    if (window.jellemplexDeleteAuth[cacheKey]) {
+        return window.jellemplexDeleteAuth[cacheKey];
+    }
+
+    const credentials = await promptForEmbyCredentials(serverType);
+    const endpoint = serverType === 'jellyfin' ? '/Users/AuthenticateByName' : '/emby/Users/AuthenticateByName';
+    const response = await fetch(`${serverUrl}${endpoint}`, {
+        method: 'POST',
+        headers: {
+            ...getEmbyAuthHeaders('', ''),
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            Username: credentials.username,
+            Pw: credentials.password
+        })
+    });
+
+    if (!response.ok) {
+        throw new Error(`${serverType.charAt(0).toUpperCase() + serverType.slice(1)} login failed: ${response.status}`);
+    }
+
+    const data = await response.json();
+    if (!data.AccessToken || !data.User || !data.User.Id) {
+        throw new Error(`${serverType.charAt(0).toUpperCase() + serverType.slice(1)} login did not return an access token`);
+    }
+
+    window.jellemplexDeleteAuth[cacheKey] = {
+        token: data.AccessToken,
+        userId: data.User.Id
+    };
+
+    return window.jellemplexDeleteAuth[cacheKey];
 }
 
 async function fetchMoviesFromLibrary(serverUrl, apiKey, libraryId, serverType, userId) {
@@ -1569,10 +1654,10 @@ async function deleteMovieFromServer(itemId, movieTitle, rowElement) {
         } else {
             // Emby/Jellyfin
             const endpoint = serverType === 'jellyfin' ? '/Items' : '/emby/Items';
-            const userId = await fetchServerUserId(fullServerUrl, apiKey, serverType);
-            const headers = getEmbyAuthHeaders(apiKey, userId);
+            const deleteAuth = await getEmbyDeleteAuth(fullServerUrl, serverType);
+            const headers = getEmbyAuthHeaders(deleteAuth.token, deleteAuth.userId);
             const userItemEndpoint = serverType === 'jellyfin' ? '/Users' : '/emby/Users';
-            const itemResponse = await fetch(`${fullServerUrl}${userItemEndpoint}/${userId}/Items/${itemId}`, {
+            const itemResponse = await fetch(`${fullServerUrl}${userItemEndpoint}/${deleteAuth.userId}/Items/${itemId}`, {
                 headers
             });
 
