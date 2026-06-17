@@ -1171,7 +1171,7 @@ function showDuplicatesHTML(libraryName, duplicates) {
         justify-content: center;
         line-height: 1;
     `;
-    closeButton.onclick = () => document.body.removeChild(modal);
+    closeButton.onclick = closeModal;
     
     // Create header
     const header = document.createElement('div');
@@ -1378,21 +1378,25 @@ function showDuplicatesHTML(libraryName, duplicates) {
     // Add to page
     document.body.appendChild(modal);
     
-    // Close on background click
-    modal.onclick = (e) => {
-        if (e.target === modal) {
-            document.body.removeChild(modal);
-        }
-    };
+    // Do not close on background clicks. The results table can overflow on
+    // smaller screens, making accidental overlay clicks too easy.
+    modal.onclick = (e) => e.stopPropagation();
+    modalContent.onclick = (e) => e.stopPropagation();
     
     // Close on Escape key
     const handleEscape = (e) => {
         if (e.key === 'Escape') {
-            document.body.removeChild(modal);
-            document.removeEventListener('keydown', handleEscape);
+            closeModal();
         }
     };
     document.addEventListener('keydown', handleEscape);
+
+    function closeModal() {
+        if (modal.parentNode) {
+            modal.parentNode.removeChild(modal);
+        }
+        document.removeEventListener('keydown', handleEscape);
+    }
 }
 
 function clearSavedData() {
